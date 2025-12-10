@@ -1,4 +1,9 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { DataSource, Repository } from 'typeorm';
 import { Task } from './task.entity';
 import { CreateTaskDto } from './dto/create-task.dto';
@@ -8,26 +13,37 @@ import { User } from 'src/auth/user.entity';
 
 @Injectable()
 export class TasksRepository extends Repository<Task> {
+  private logger = new Logger('Task Repository', { timestamp: true });
   constructor(private dataSource: DataSource) {
     super(Task, dataSource.createEntityManager());
   }
 
-  async getTasks(filterDto: GetTaskFilterDto): Promise<Task[]> {
+  async getTasks(filterDto: GetTaskFilterDto, user: User): Promise<Task[]> {
     const { status, search } = filterDto;
     const query = this.createQueryBuilder('task');
+    query.where({ user });
     if (status) {
       query.andWhere('task.status = :status', { status });
     }
 
     if (search) {
       query.andWhere(
-        'LOWER(task.title) LIKE LOWER(:search) OR LOWER(task.description) LIKE LOWER(:search)',
+        '(LOWER(task.title) LIKE LOWER(:search) OR LOWER(task.description) LIKE LOWER(:search))',
         { search: `%${search}%` },
       );
+      //like is for partial match and also `%${search}%`
     }
-    const tasks = await query.getMany();
-    //like is for partial match and also `%${search}%`
-    return tasks;
+    // this error handling would be done by nestjs if we didnt use try catch block, as we done we have to throw error
+    try {
+      const tasks = await query.getMany();
+      return tasks;
+    } catch (error) {
+      this.logger.error(
+        `Failed to get tasks for user "${user.username}". Filters: ${JSON.stringify(filterDto)}`,
+        error.stack,
+      );
+      throw new InternalServerErrorException();
+    }
   }
 
   async createTask(createTaskDto: CreateTaskDto, user: User): Promise<Task> {
@@ -42,23 +58,28 @@ export class TasksRepository extends Repository<Task> {
     await this.save(task);
     return task;
   }
-  async getTaskById(id: string): Promise<Task> {
-    const found = await this.findOne({ where: { id: id } });
+  async getTaskById(id: string, user?: User): Promise<Task> {
+    const found = await this.findOne({ where: { id, user } });
 
     if (!found) {
       throw new NotFoundException(`Task with id: "${id}" not foumd!`);
     }
     return found;
   }
-  async deleteTask(id: string): Promise<void> {
-    const result = await this.delete(id);
+  async deleteTask(id: string, user: User): Promise<void> {
+    // const result = await this.delete(id);
+    const result = await this.delete({ id, user });
     if (result.affected === 0) {
       throw new NotFoundException(`Task with ID "${id}" not found!`);
     }
   }
 
-  async updateTaskStatus(id: string, status: TaskStatus): Promise<Task> {
-    const task = await this.getTaskById(id);
+  async updateTaskStatus(
+    id: string,
+    status: TaskStatus,
+    user: User,
+  ): Promise<Task> {
+    const task = await this.getTaskById(id, user);
     task.status = status;
     await this.save(task);
     return task;
